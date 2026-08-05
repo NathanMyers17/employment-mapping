@@ -18,14 +18,49 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "job_market.db"
 OEWS_FILE = RAW_DIR / "MSA_M2025_dl.xlsx"
 GAZ_FILE = RAW_DIR / "2025_Gaz_cbsa_national.txt"
 
-NUMERIC_COLS = ["TOT_EMP", "A_MEAN", "H_MEAN"]
+# Plain numeric fields: BLS uses "*"/"**" for "not available" (no top-code
+# concept applies), so a straight coerce-to-NaN is correct here.
+NUMERIC_COLS = ["TOT_EMP", "LOC_QUOTIENT", "JOBS_1000"]
+
+# Wage fields additionally use "#" for *top-coded* values (a known lower
+# bound - e.g. "at least $239,200/yr" - not a missing value). Coercing "#"
+# straight to NaN the way NUMERIC_COLS does would silently throw that lower
+# bound away. HOURLY_TOPCODE/ANNUAL_TOPCODE are BLS's own published caps
+# (see the raw file's "Field Descriptions" sheet).
+HOURLY_WAGE_COLS = ["H_MEAN", "H_PCT10", "H_PCT25", "H_MEDIAN", "H_PCT75", "H_PCT90"]
+ANNUAL_WAGE_COLS = ["A_MEAN", "A_PCT10", "A_PCT25", "A_MEDIAN", "A_PCT75", "A_PCT90"]
+HOURLY_TOPCODE = 115.00
+ANNUAL_TOPCODE = 239200
+
+
+def parse_wage_column(series: pd.Series, topcode_value: float) -> tuple[pd.Series, pd.Series]:
+    """Coerce a wage column to numeric, tracking "#" (top-coded) separately
+    from "*"/"**" (not available) instead of collapsing both to NaN."""
+    topcoded = series.astype(str).str.strip() == "#"
+    numeric = pd.to_numeric(series.mask(topcoded, topcode_value), errors="coerce")
+    return numeric, topcoded
 
 
 def load_oews() -> pd.DataFrame:
     df = pd.read_excel(OEWS_FILE)
     df = df[df["O_GROUP"].isin(["major", "detailed"])].copy()
+
     for col in NUMERIC_COLS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    topcoded_flags = []
+    for col in HOURLY_WAGE_COLS:
+        df[col], flag = parse_wage_column(df[col], HOURLY_TOPCODE)
+        topcoded_flags.append(flag)
+    for col in ANNUAL_WAGE_COLS:
+        df[col], flag = parse_wage_column(df[col], ANNUAL_TOPCODE)
+        topcoded_flags.append(flag)
+    # One row-level flag rather than one per wage column: keeps the schema
+    # from growing by 12 boolean columns for a case that's rare and, when it
+    # happens, usually hits several of a row's wage fields at once (e.g. if
+    # the mean is top-coded, the 90th percentile usually is too).
+    df["WAGE_TOPCODED"] = pd.concat(topcoded_flags, axis=1).any(axis=1)
+
     return df
 
 
@@ -61,17 +96,36 @@ def build_occupation_table(oews: pd.DataFrame) -> pd.DataFrame:
     return occ[["soc_code", "soc_title", "level", "major_group_code", "major_group_title"]]
 
 
+EMPLOYMENT_COLS = (
+    ["AREA", "OCC_CODE", "TOT_EMP", "LOC_QUOTIENT", "JOBS_1000", "WAGE_TOPCODED"]
+    + HOURLY_WAGE_COLS
+    + ANNUAL_WAGE_COLS
+)
+EMPLOYMENT_RENAME = {
+    "AREA": "area_code",
+    "OCC_CODE": "soc_code",
+    "TOT_EMP": "tot_emp",
+    "LOC_QUOTIENT": "loc_quotient",
+    "JOBS_1000": "jobs_1000",
+    "WAGE_TOPCODED": "wage_topcoded",
+    "H_MEAN": "h_mean",
+    "H_PCT10": "h_pct10",
+    "H_PCT25": "h_pct25",
+    "H_MEDIAN": "h_median",
+    "H_PCT75": "h_pct75",
+    "H_PCT90": "h_pct90",
+    "A_MEAN": "a_mean",
+    "A_PCT10": "a_pct10",
+    "A_PCT25": "a_pct25",
+    "A_MEDIAN": "a_median",
+    "A_PCT75": "a_pct75",
+    "A_PCT90": "a_pct90",
+}
+
+
 def build_employment_table(oews: pd.DataFrame) -> pd.DataFrame:
-    emp = oews[["AREA", "OCC_CODE", "TOT_EMP", "A_MEAN", "H_MEAN"]].copy()
-    emp = emp.rename(
-        columns={
-            "AREA": "area_code",
-            "OCC_CODE": "soc_code",
-            "TOT_EMP": "tot_emp",
-            "A_MEAN": "a_mean",
-            "H_MEAN": "h_mean",
-        }
-    )
+    emp = oews[EMPLOYMENT_COLS].copy()
+    emp = emp.rename(columns=EMPLOYMENT_RENAME)
     emp["area_code"] = emp["area_code"].astype(str)
     return emp
 
