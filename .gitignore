@@ -6,3 +6,4 @@ data/raw/
 data/*.db
 .claude/
 .env
+CLAUDE.md
