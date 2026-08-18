@@ -1,11 +1,12 @@
 """
-Job Market Map — Phase 3.
+Job Market Map — Phase 4.
 
 Pick a job field (and optionally drill into a specific detailed occupation),
 see per-metro data on a map colored either by raw employment or by
 concentration (location quotient) relative to the national average. Click a
-metro for wages (mean + 10th-90th percentile range), land area, and top
-occupations in the field.
+metro for wages (mean + 10th-90th percentile range), top occupations in the
+field, and place-level context (population, unemployment, land area,
+educational attainment) that doesn't depend on the field/occupation picked.
 """
 
 import sqlite3
@@ -107,6 +108,8 @@ color_mode = st.radio(
 emp_df = run_query(
     """
     SELECT m.area_code, m.area_title, m.lat, m.lon, m.land_area_sqmi,
+           m.population, m.unemployment_rate, m.unemployment_rate_year,
+           m.pct_bachelors_or_higher, m.pct_bachelors_or_higher_moe,
            e.tot_emp, e.loc_quotient, e.jobs_1000,
            e.a_mean, e.h_mean, e.a_pct10, e.a_pct90, e.wage_topcoded
     FROM employment e
@@ -216,11 +219,29 @@ with col_panel:
             lo = fmt_wage(row.a_pct10, ANNUAL_TOPCODE).replace("$", r"\$")
             hi = fmt_wage(row.a_pct90, ANNUAL_TOPCODE).replace("$", r"\$")
             st.write(f"Wage range (10th–90th percentile): {lo} – {hi}")
-        st.write(
-            f"Land area: {row.land_area_sqmi:,.0f} sq mi"
-            if pd.notna(row.land_area_sqmi)
-            else "Land area: N/A"
-        )
+
+        st.divider()
+        st.write("**About this metro** (independent of the field/occupation selected above):")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.metric("Population", f"{int(row.population):,}" if pd.notna(row.population) else "N/A")
+            st.write(
+                f"Land area: {row.land_area_sqmi:,.0f} sq mi"
+                if pd.notna(row.land_area_sqmi)
+                else "Land area: N/A"
+            )
+        with col_b:
+            if pd.notna(row.unemployment_rate):
+                st.metric("Unemployment rate", f"{row.unemployment_rate:.1f}%")
+                st.caption(f"{int(row.unemployment_rate_year)} annual average")
+            else:
+                st.metric("Unemployment rate", "N/A")
+            if pd.notna(row.pct_bachelors_or_higher):
+                st.write(f"Bachelor's degree or higher: {row.pct_bachelors_or_higher:.1f}%")
+                st.caption(f"±{row.pct_bachelors_or_higher_moe:.1f} pts margin of error")
+            else:
+                st.write("Bachelor's degree or higher: N/A")
 
         top_occ = run_query(
             """

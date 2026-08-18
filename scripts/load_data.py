@@ -17,6 +17,9 @@ DB_PATH = Path(__file__).resolve().parent.parent / "data" / "job_market.db"
 
 OEWS_FILE = RAW_DIR / "MSA_M2025_dl.xlsx"
 GAZ_FILE = RAW_DIR / "2025_Gaz_cbsa_national.txt"
+POP_FILE = RAW_DIR / "cbsa-est2025-alldata.csv"
+UNEMPLOYMENT_FILE = RAW_DIR / "fred_unemployment.csv"
+EDUCATION_FILE = RAW_DIR / "acs_education.csv"
 
 # Plain numeric fields: BLS uses "*"/"**" for "not available" (no top-code
 # concept applies), so a straight coerce-to-NaN is correct here.
@@ -77,11 +80,41 @@ def load_gazetteer() -> pd.DataFrame:
     return gaz[["area_code", "land_area_sqmi", "lat", "lon"]]
 
 
-def build_msa_table(oews: pd.DataFrame, gaz: pd.DataFrame) -> pd.DataFrame:
+def load_population() -> pd.DataFrame:
+    # This file also contains each large metro's "Metropolitan Division"
+    # sub-areas (e.g. Atlanta splits into two), sharing the SAME CBSA code
+    # as their parent metro row (a separate MDIV column distinguishes them).
+    # OEWS reports the unified metro, not its divisions, so keeping only
+    # LSAD == 'Metropolitan Statistical Area' is what keeps this a clean
+    # one-row-per-code join instead of fanning out into duplicates.
+    pop = pd.read_csv(POP_FILE, dtype={"CBSA": str, "STCOU": str}, encoding="latin-1")
+    pop = pop[(pop["STCOU"].isna() | (pop["STCOU"] == "")) & (pop["LSAD"] == "Metropolitan Statistical Area")]
+    pop = pop.rename(columns={"CBSA": "area_code", "POPESTIMATE2025": "population"})
+    return pop[["area_code", "population"]]
+
+
+def load_unemployment() -> pd.DataFrame:
+    # Fetched separately by scripts/fetch_unemployment.py (via FRED, since
+    # BLS's own site/download domain is blocked from this environment - see
+    # NOTES.md). Static cached file, same treatment as the other raw inputs.
+    return pd.read_csv(UNEMPLOYMENT_FILE, dtype={"area_code": str})
+
+
+def load_education() -> pd.DataFrame:
+    # Fetched separately by scripts/fetch_education.py (Census ACS 5-year).
+    return pd.read_csv(EDUCATION_FILE, dtype={"area_code": str})
+
+
+def build_msa_table(
+    oews: pd.DataFrame, gaz: pd.DataFrame, pop: pd.DataFrame, unemployment: pd.DataFrame, education: pd.DataFrame
+) -> pd.DataFrame:
     msa = oews[["AREA", "AREA_TITLE"]].drop_duplicates()
     msa = msa.rename(columns={"AREA": "area_code", "AREA_TITLE": "area_title"})
     msa["area_code"] = msa["area_code"].astype(str)
     msa = msa.merge(gaz, on="area_code", how="left")
+    msa = msa.merge(pop, on="area_code", how="left")
+    msa = msa.merge(unemployment, on="area_code", how="left")
+    msa = msa.merge(education, on="area_code", how="left")
     return msa
 
 
@@ -133,8 +166,11 @@ def build_employment_table(oews: pd.DataFrame) -> pd.DataFrame:
 def main():
     oews = load_oews()
     gaz = load_gazetteer()
+    pop = load_population()
+    unemployment = load_unemployment()
+    education = load_education()
 
-    msa = build_msa_table(oews, gaz)
+    msa = build_msa_table(oews, gaz, pop, unemployment, education)
     occupation = build_occupation_table(oews)
     employment = build_employment_table(oews)
 
@@ -147,6 +183,8 @@ def main():
     print(f"occupation: {len(occupation)} rows")
     print(f"employment: {len(employment)} rows")
     print(f"MSAs missing gazetteer match: {msa['land_area_sqmi'].isna().sum()}")
+    print(f"MSAs missing population/unemployment (Puerto Rico metros - separate files, not pulled): "
+          f"{msa['population'].isna().sum()}/{msa['unemployment_rate'].isna().sum()}")
 
 
 if __name__ == "__main__":
